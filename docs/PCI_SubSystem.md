@@ -1,3 +1,97 @@
+# pci_host_bridge
+## 代碼位置
+```
+include/linux/pci.h
+```
+## 用途 
+代表 PCI 主機橋接器（ Host Bridge ）
+- 這是系統層級的結構，不是單一 PCI 設備
+- 負責連接 CPU / 內存系統與 PCI 匯流排
+- 管理整個 PCI 匯流排樹狀結構的根部
+- 每個 PCI 主機控制器對應一個 pci_host_bridge
+
+## 欄位
+### struct device dev
+- 對應的設備結構。
+- dev.parent 為 `devm_pci_alloc_host_bridge` 傳入的 dev。 最常見的是 PCI 控制器的 platform_dev->dev; 
+	```
+	  Platform Device (PCIe 控制器)
+      └── PCI Host Bridge
+          └── PCI Root Bus
+              └── PCI Devices
+	```
+### struct pci_bus *bus
+- 指向根匯流排 （ root bus ）
+
+### struct pci_ops *ops
+- PCI 操作函數集
+
+### struct pci_ops *child_ops
+- 子匯流排的操作函數集。 需要 ATU 進行位置轉換
+	```
+	PCIe Controller (Bus 0)
+	├── Root Port (Bus 0, Device 0) ← 使用 ops
+	└── PCI-to-PCI Bridge
+      └── Secondary Bus (Bus 1) ← 使用 child_ops
+          ├── Device A (Bus 1, Device 0)
+          └── Device B (Bus 1, Device 1)
+	```
+
+### struct list_head windows
+- I/O 和記憶體窗口資源
+
+### int domain_nr 
+- PCI 網域編號
+
+
+## 關係圖
+```
+  PCI Host Bridge (pci_host_bridge)
+      └── Root Bus (pci_bus)
+          ├── PCI Device 1 (pci_dev)
+          ├── PCI Device 2 (pci_dev)
+          └── PCI-to-PCI Bridge (pci_dev)
+              └── Secondary Bus (pci_bus)
+                  ├── PCI Device 3 (pci_dev)
+                  └── PCI Device 4 (pci_dev)
+```
+
+# pci_dev
+
+
+# pci_bus
+
+# PCIe Switch 
+- 一個 PCIe Switch 會在 Linux PCI 子系統呈現為多個 pci_dev 結構：
+	1. Upstream Port 的 pci_dev
+		- 類型: PCI_EXP_TYPE_UPSTREAM (0x5)
+		- 位置: 連接到 pci_host_bridge 的 root bus 上
+		- 作用: Switch 的入口埠
+		- 數量: 每個 Switch 只有 1 個
+	
+	2. Downstream Port 的 pci_dev
+		- 類型: PCI_EXP_TYPE_DOWNSTREAM (0x6)
+		- 位置: 位於 Switch 內部的 secondary bus 上
+		- 作用: Switch 的出口埠，各自連接不同的端點設備
+		- 數量: 每個 Switch 可有多個 (通常 2-8 個)
+
+- 實際的 PCI 拓撲枚舉
+```
+  pci 0000:00:00.0: Root Port (pci_host_bridge 創建的根端口)
+  ├─pci 0000:01:00.0: Upstream Port (Switch 入口) ← pci_dev #1
+  │ └─pci 0000:02:00.0: Downstream Port (Switch 出口1) ← pci_dev #2
+  │   └─pci 0000:03:00.0: PCIe Device (實際設備)
+  ├─pci 0000:02:01.0: Downstream Port (Switch 出口2) ← pci_dev #3
+  │ └─pci 0000:04:00.0: PCIe Device (實際設備)
+  └─pci 0000:02:02.0: Downstream Port (Switch 出口3) ← pci_dev #4
+    └─pci 0000:05:00.0: PCIe Device (實際設備)
+```
+- 重要觀念
+PCIe Switch 不是單一 pci_dev，而是：
+	- 1 個 Upstream Port pci_dev (連接上級)
+	- N 個 Downstream Port pci_dev (連接下級設備)
+	- 1 個虛擬 PCI-to-PCI Bridge (內部路由邏輯)
+
 # pci_scan_root_bus_bridge
 ## 主要作用 
 `pci_scan_root_bus_bridge` 是 PCI 設備枚舉的核心函數，負責
