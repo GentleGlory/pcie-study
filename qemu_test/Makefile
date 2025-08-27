@@ -13,10 +13,13 @@ BBFILE := busybox-$(BBVER).tar.bz2
 BBTAR := $(BUILD)/$(BBFILE)
 BBDIR := $(BUILD)/busybox-$(BBVER)
 IMAGE := $(KDIR)/arch/$(ARCH)/boot/Image
-SRC_DTB := $(BUILD)/frank_pcie_test.dtb
-DTB := $(SRC_DTB)
+DTB := $(BUILD)/frank_pcie_test.dtb
 INITRD := $(BUILD)/rootfs.cpio.gz
 SRC := $(ROOT)/src
+SRC_PCIE_DRV := $(SRC)/frank_pcie
+SRC_PCIE_DRV_FILE := pci-host-test.ko
+SRC_E1000E_DRV := $(SRC)/frank_e1000e
+SRC_E1000E_DRV_FILE := frank_e1000e.ko
 
 .PHONY: all run kernel busybox rootfs menuconfig kdefconfig kconfig-min clean kfrag
 
@@ -37,19 +40,19 @@ kconfig-min: kdefconfig kfrag
 	$(KDIR)/scripts/kconfig/merge_config.sh -m -O $(KDIR) $(KDIR)/.config $(ROOT)/kfrag
 	$(MAKE) -C $(KDIR) ARCH=$(ARCH) olddefconfig
 
-kernel: pci-host-test kconfig-min
-	$(MAKE) -C $(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS) -j$(J) Image
-	$(MAKE) -C $(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS) -j$(J) dtbs
-	
-# Compile our custom DTB
-$(SRC_DTB): $(KDIR) $(SRC)/frank_pcie_test.dts
-	dtc -I dts -O dtb -o $@ src/frank_pcie_test.dts
+kernel: kconfig-min
+	$(MAKE) -C $(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS) -j$(J)
+		
+# Compile our custom DTB and pcie driver
+$(SRC_PCIE_DRV_FILE): kernel
+	$(MAKE) -C $(SRC_PCIE_DRV) clean
+	$(MAKE) -C $(SRC_PCIE_DRV) all
 
-# Compile our custom driver module
-pci-host-test: $(KDIR) $(SRC)/pci-host-test.c
-	cp $(SRC)/pci-host-test.c $(KDIR)/drivers/pci/controller/
-	grep -q 'pci-host-test.o' $(KDIR)/drivers/pci/controller/Makefile || echo 'obj-y += pci-host-test.o' >> $(KDIR)/drivers/pci/controller/Makefile
 
+# Compile our custom e1000e module
+$(SRC_E1000E_DRV_FILE): kernel
+	$(MAKE) -C $(SRC_E1000E_DRV) clean
+	$(MAKE) -C $(SRC_E1000E_DRV) all
 
 menuconfig:
 	$(MAKE) -C $(KDIR) ARCH=$(ARCH) menuconfig
@@ -72,28 +75,34 @@ busybox: $(BBDIR)
 rootfs: busybox
 	rm -rf $(BUILD)/rootfs && mkdir -p $(BUILD)/rootfs
 	cp -a $(BBDIR)/_install/* $(BUILD)/rootfs/
+	mkdir -p $(BUILD)/rootfs/usr/lib/modules
+	cp -a $(BUILD)/*.ko $(BUILD)/rootfs/usr/lib/modules
 	mkdir -p $(BUILD)/rootfs/proc $(BUILD)/rootfs/sys $(BUILD)/rootfs/dev $(BUILD)/rootfs/tmp $(BUILD)/rootfs/root $(BUILD)/rootfs/home
 	printf '%s\n' '#!/bin/sh' \
 	'mount -t proc none /proc' \
 	'mount -t sysfs none /sys' \
 	'mount -t tmpfs none /tmp' \
+	'insmod /usr/lib/modules/$(SRC_PCIE_DRV_FILE)' \
+	'insmod /usr/lib/modules/$(SRC_E1000E_DRV_FILE)' \
 	'echo "Hello from minimal rootfs!"' \
 	'exec /bin/sh' > $(BUILD)/rootfs/init
 	chmod +x $(BUILD)/rootfs/init
 	( cd $(BUILD)/rootfs && find . | cpio -H newc -o ) | gzip -9 > $(INITRD)
 
 # ---------- Run ----------
-run: kernel $(SRC_DTB) rootfs scripts/run_qemu.sh
+run: kernel $(SRC_PCIE_DRV_FILE) $(SRC_E1000E_DRV_FILE) rootfs scripts/run_qemu.sh
 	bash scripts/run_qemu.sh "$(IMAGE)" "$(DTB)" "$(INITRD)"
 
 clean:
+	[ -d "$(KDIR)" ] && $(MAKE) -C $(SRC_PCIE_DRV) clean || true
+	[ -d "$(KDIR)" ] && $(MAKE) -C $(SRC_E1000E_DRV) clean || true
 	[ -d "$(KDIR)" ] && $(MAKE) -C $(KDIR) ARCH=$(ARCH) clean || true
 	[ -d "$(BBDIR)" ] && $(MAKE) -C $(BBDIR) clean || true
 	rm -f $(INITRD)
-	rm kfrag
+	rm -f kfrag
 
 distclean:
-	rm kfrag
+	rm -f kfrag
 	rm -rf $(BUILD)
 
 # ---------- Files ----------
@@ -101,12 +110,12 @@ kfrag:
 	@echo 'CONFIG_PRINTK_TIME=y' > kfrag
 	@echo 'CONFIG_PCI=y' >> kfrag
 	@echo 'CONFIG_PCI_MSI=y' >> kfrag
-	@echo 'CONFIG_PCI_HOST_GENERIC=y' >> kfrag
 	@echo 'CONFIG_DEVTMPFS=y' >> kfrag
 	@echo 'CONFIG_DEVTMPFS_MOUNT=y' >> kfrag
 	@echo 'CONFIG_TMPFS=y' >> kfrag
 	@echo 'CONFIG_BLK_DEV_INITRD=y' >> kfrag
-	@echo 'CONFIG_E1000E=y' >> kfrag
+	@echo 'CONFIG_E1000=n' >> kfrag
+	@echo 'CONFIG_E1000E=n' >> kfrag
 	@echo '# helpful but optional:' >> kfrag
 	@echo 'CONFIG_VIRTIO_BLK=y' >> kfrag
 	
