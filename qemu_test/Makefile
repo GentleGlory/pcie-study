@@ -77,6 +77,8 @@ rootfs: busybox
 	cp -a $(BBDIR)/_install/* $(BUILD)/rootfs/
 	mkdir -p $(BUILD)/rootfs/usr/lib/modules
 	cp -a $(BUILD)/*.ko $(BUILD)/rootfs/usr/lib/modules
+	cp -a $(BUILD)/linux/drivers/net/ethernet/intel/e1000e/*.ko $(BUILD)/rootfs/usr/lib/modules
+	cp -a $(BUILD)/linux/drivers/net/ethernet/intel/e1000/*.ko $(BUILD)/rootfs/usr/lib/modules
 	mkdir -p $(BUILD)/rootfs/proc $(BUILD)/rootfs/sys $(BUILD)/rootfs/dev $(BUILD)/rootfs/tmp $(BUILD)/rootfs/root $(BUILD)/rootfs/home
 	printf '%s\n' '#!/bin/sh' \
 	'mount -t proc none /proc' \
@@ -114,8 +116,8 @@ kfrag:
 	@echo 'CONFIG_DEVTMPFS_MOUNT=y' >> kfrag
 	@echo 'CONFIG_TMPFS=y' >> kfrag
 	@echo 'CONFIG_BLK_DEV_INITRD=y' >> kfrag
-	@echo 'CONFIG_E1000=n' >> kfrag
-	@echo 'CONFIG_E1000E=n' >> kfrag
+	@echo 'CONFIG_E1000=m' >> kfrag
+	@echo 'CONFIG_E1000E=m' >> kfrag
 	@echo '# helpful but optional:' >> kfrag
 	@echo 'CONFIG_VIRTIO_BLK=y' >> kfrag
 	

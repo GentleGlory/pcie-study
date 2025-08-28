@@ -9,6 +9,10 @@
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/bits.h>
+#include <linux/iopoll.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 
 #define DRIVER_NAME		"frank_e1000e"
 #define DRIVER_VERSION	"1.0.0"
@@ -17,6 +21,22 @@
 #define FRANK_E1000E_DEV_ID_82545EM		0x100F
 #define FRANK_E1000E_DEV_ID_82571EB		0x105E
 #define FRANK_E1000E_DEV_ID_82574L		0x10D3
+
+#define FRANK_E1000E_CTRL_REG			0x00000
+#define   FRANK_E1000E_CTRL_RST			BIT(26)
+#define   FRANK_E1000E_CTRL_FRCDPLX		BIT(12)
+#define   FRANK_E1000E_CTRL_FRCSPD		BIT(11)
+#define   FRANK_E1000E_CTRL_SLU			BIT(6)
+#define   FRANK_E1000E_CTRL_ASDE		BIT(5)
+
+
+#define FRANK_E1000E_EERD_REG			0x00014
+#define   FRANK_E1000E_EERD_START				BIT(0)
+#define   FRANK_E1000E_EERD_DONE				BIT(1)
+#define   FRANK_E1000E_EERD_ADDR_MASK		GENMASK(15, 2)
+#define   FRANK_E1000E_EERD_ADDR(addr)		(((addr) & GENMASK(13, 0)) << 2)
+#define   FRANK_E1000E_EERD_DATA(val)			(((val) & GENMASK(31,16)) >> 16)
+#define   FRANK_E1000E_EERD_TIMEOUT		10000	//10ms
 
 #define FRANK_E1000E_IMC_REG			0x000D8
 #define   FRANK_E1000E_IMC_TXDW			BIT(0)
@@ -45,6 +65,9 @@
 		FRANK_E1000E_IMC_RXQ1 | FRANK_E1000E_IMC_TXQ0 |\
 		FRANK_E1000E_IMC_TXQ1 | FRANK_E1000E_IMC_OTHER)
 
+#define FRANK_E1000E_GCR_REG			0x05B00
+#define   FRANK_E1000E_GCR_SW_INIT		BIT(22)
+
 
 struct frank_e1000e_adapter; 
 
@@ -60,7 +83,7 @@ struct frank_e1000e_adapter {
 	struct pci_dev			*pci;
 	struct frank_e1000e_hw	*hw;
 
-
+	u8		mac_address[6];
 	u32		msg_enable;
 };
 
