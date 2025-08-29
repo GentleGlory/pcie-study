@@ -72,6 +72,38 @@
 		FRANK_E1000E_INT_RXQ1 | FRANK_E1000E_INT_TXQ0 |\
 		FRANK_E1000E_INT_TXQ1 | FRANK_E1000E_INT_OTHER)
 
+#define FRANK_E1000E_RCTL_REG			0x00100
+#define   FRANK_E1000E_RCTL_EN			BIT(1)
+#define   FRANK_E1000E_RCTL_SBP			BIT(2)
+#define   FRANK_E1000E_RCTL_UPE			BIT(3)
+#define   FRANK_E1000E_RCTL_MPE			BIT(4)
+#define   FRANK_E1000E_RCTL_DTYP_MASK	GENMASK(11, 10)
+#define   FRANK_E1000E_RCTL_DTYP_LEGACY	(0x0 << 10)
+#define   FRANK_E1000E_RCTL_DTYP_SPLIT	(0x1 << 10)
+#define   FRANK_E1000E_RCTL_BAM			BIT(15)
+#define   FRANK_E1000E_RCTL_BSEX		BIT(25)
+#define   FRANK_E1000E_RCTL_SECRC		BIT(26)
+#define   FRANK_E1000E_RCTL_BSIZE_MASK	GENMASK(17, 16)
+#define   FRANK_E1000E_RCTL_BSIZE_2048(val)	((val & ~FRANK_E1000E_RCTL_BSEX) | 0 << 16)
+#define   FRANK_E1000E_RCTL_BSIZE_1024(val)	((val & ~FRANK_E1000E_RCTL_BSEX) | 1 << 16)
+#define   FRANK_E1000E_RCTL_BSIZE_512(val)	((val & ~FRANK_E1000E_RCTL_BSEX) | 2 << 16)
+#define   FRANK_E1000E_RCTL_BSIZE_256(val)	((val & ~FRANK_E1000E_RCTL_BSEX) | 3 << 16)
+#define   FRANK_E1000E_RCTL_BSIZE_16384(val)	((val | FRANK_E1000E_RCTL_BSEX) | 1 << 16)
+#define   FRANK_E1000E_RCTL_BSIZE_8192(val)	((val | FRANK_E1000E_RCTL_BSEX) | 2 << 16)
+#define   FRANK_E1000E_RCTL_BSIZE_4096(val)	((val | FRANK_E1000E_RCTL_BSEX) | 3 << 16)
+
+#define FRANK_E1000E_RFCTL_REG			0x05008
+#define   FRANK_E1000E_RFCTL_EXSTEN		BIT(15)
+
+
+
+#define FRANK_E1000E_RDBAL0_REG			0x02800
+#define FRANK_E1000E_RDBAH0_REG			0x02804
+#define FRANK_E1000E_RDLEN0_REG			0x02808
+#define FRANK_E1000E_RDH0_REG			0x02810
+#define FRANK_E1000E_RDT0_REG			0x02818
+
+
 #define FRANK_E1000E_TCTL_REG			0x00400
 #define   FRANK_E1000E_TCTL_EN			BIT(1)
 #define   FRANK_E1000E_TCTL_PSP			BIT(3)
@@ -110,6 +142,10 @@
 
 #define FRANK_E1000E_TXD_STAT_DD	BIT(0) /* Descriptor Done */
 
+#define FRANK_E1000E_RX_RING_SIZE	256
+
+#define FRANK_E1000E_RX_STAT_DD		BIT(0)
+#define FRANK_E1000E_RX_STAT_EOP	BIT(1)
 
 struct frank_e1000e_adapter; 
 struct frank_e1000e_hw;
@@ -121,14 +157,6 @@ struct frank_e1000e_hw {
 	u16		device_id;
 	u16		vendor_id;
 };
-
-/* TODO(human): TX descriptor ring structures
- * Need to add:
- * 1. TX descriptor structure (frank_e1000e_tx_desc)
- * 2. TX ring structure (frank_e1000e_tx_ring)
- * 3. TX ring management fields in adapter
- * 4. TX hardware register definitions
- */
 
 struct frank_e1000e_tx_desc {
 	__le64 buffer_addr;
@@ -151,6 +179,15 @@ struct frank_e1000e_tx_desc {
 	} upper;
 };
 
+struct frank_e1000e_legacy_rx_desc {
+	__le64	buffer_addr;
+	__le16	length;
+	__le16	checksum;
+	u8		status;
+	u8		errors;
+	__le16	special;
+};
+
 struct frank_e1000e_adapter {
 	struct net_device		*netdev;
 	struct pci_dev			*pci;
@@ -165,6 +202,13 @@ struct frank_e1000e_adapter {
 	unsigned int					tx_head;
 	unsigned int					tx_tail;
 	struct sk_buff					**tx_skb;
+
+	struct frank_e1000e_legacy_rx_desc	*rx_ring;
+	dma_addr_t						rx_ring_dma;
+	unsigned int					rx_ring_size;
+	unsigned int					rx_head;
+	unsigned int					rx_tail;
+	struct sk_buff					**rx_skb;
 };
 
 static inline void frank_e1000e_writel(struct frank_e1000e_hw *hw, u32 reg, u32 val)

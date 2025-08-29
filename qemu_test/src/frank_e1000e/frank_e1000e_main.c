@@ -67,8 +67,6 @@ static netdev_tx_t frank_e1000e_ndo_start_xmit(struct sk_buff *skb, struct net_d
 	unsigned int tx_tail;
 	u32 cmd_flags;
 
-	pci_info(pdev, "ndo_start_xmit called: skb len=%d\n", skb->len);
-
 	tx_tail = adapter->tx_tail;
 	if (((tx_tail + 1) % adapter->tx_ring_size) == adapter->tx_head ) {
 		netif_stop_queue(netdev);
@@ -284,6 +282,76 @@ static void frank_e1000e_clear_tx_ring(struct frank_e1000e_adapter *adapter)
 	}
 }
 
+static void frank_e1000e_clean_rx_ring(struct frank_e1000e_adapter *adapter)
+{
+	struct frank_e1000e_legacy_rx_desc *desc;
+	unsigned int head;
+	struct net_device *netdev = adapter->netdev;
+	struct pci_dev *pdev = adapter->pci;
+	unsigned int rx_head;
+	unsigned int next = adapter->rx_tail;
+	struct sk_buff *skb, *new_skb;
+	int completed = 0, cnt = 0;
+	unsigned int size = 0;
+	dma_addr_t dma_addr;
+	
+	rx_head = frank_e1000e_readl(adapter->hw, FRANK_E1000E_RDH0_REG) & GENMASK(15, 0);
+	adapter->rx_head = rx_head;
+	while( (next = ((next + 1) % adapter->rx_ring_size)) != rx_head) {
+		desc = &adapter->rx_ring[next];
+
+		if (!(desc->status & FRANK_E1000E_RX_STAT_DD)) {
+			break;
+		}
+
+		skb = adapter->rx_skb[next];
+
+		new_skb = netdev_alloc_skb(adapter->netdev, 2048 + NET_IP_ALIGN);
+		if (!new_skb) {
+			pci_warn(pdev, "Failed to alloc new sk buffer\n");
+			netdev->stats.rx_dropped ++;
+			goto do_next;			
+		}
+
+		skb_reserve(new_skb, NET_IP_ALIGN);
+
+		dma_addr = dma_map_single(&pdev->dev, new_skb->data, 2048, DMA_FROM_DEVICE);
+		if (dma_mapping_error(&pdev->dev, dma_addr)) {
+			dev_kfree_skb(new_skb);
+			netdev->stats.rx_dropped++;
+			pci_warn(pdev, "Failed to mapping new sk buffer\n");
+			goto do_next;
+		}
+			
+		dma_unmap_single(&pdev->dev, le64_to_cpu(desc->buffer_addr),
+				2048, DMA_FROM_DEVICE);
+
+		/* Set packet length from descriptor */
+		skb_put(skb, le16_to_cpu(desc->length));
+		
+		/* Set protocol type for network stack */
+		skb->protocol = eth_type_trans(skb, netdev);
+		
+		size += skb->len;
+		netif_rx(skb);
+		
+		desc->buffer_addr = cpu_to_le64(dma_addr);
+		adapter->rx_skb[next] = new_skb; /* Update to new SKB */
+		completed ++; 
+do_next:
+		desc->status = 0; /* Clear descriptor status */
+		cnt ++;
+	}
+
+	if (cnt) {
+		adapter->rx_tail = (adapter->rx_tail + cnt) % adapter->rx_ring_size;
+		frank_e1000e_writel(adapter->hw, FRANK_E1000E_RDT0_REG,adapter->rx_tail);
+
+		netdev->stats.rx_packets += completed;
+		netdev->stats.rx_bytes += size;
+	}
+}
+
 static irqreturn_t frank_e1000e_irq_handler(int irq, void *data)
 {
 	struct frank_e1000e_adapter *adapter = data;
@@ -300,6 +368,10 @@ static irqreturn_t frank_e1000e_irq_handler(int irq, void *data)
 
 	if (val & (FRANK_E1000E_INT_TXDW | FRANK_E1000E_INT_TXQE) ) {
 		frank_e1000e_clear_tx_ring(adapter);
+	}
+
+	if (val & (FRANK_E1000E_INT_RXT0 | FRANK_E1000E_INT_RXDMT0)) {
+		frank_e1000e_clean_rx_ring(adapter);
 	}
 	
 	
@@ -375,6 +447,109 @@ static int frank_e1000e_setup_tx_ring(struct frank_e1000e_adapter *adapter)
 	return 0; 
 }
 
+static void frank_e1000e_free_rx_ring(struct frank_e1000e_adapter *adapter)
+{
+	int i;
+	struct pci_dev *pdev = adapter->pci;
+
+	if( adapter->rx_skb == NULL || adapter->rx_ring_size == 0)
+		return;
+
+	for (i = 0; i < adapter->rx_ring_size; i++) {
+		if (!adapter->rx_skb[i])
+			continue;
+		
+		dma_unmap_single(&pdev->dev, le64_to_cpu(adapter->rx_ring[i].buffer_addr),
+				2048, DMA_FROM_DEVICE);
+		dev_kfree_skb(adapter->rx_skb[i]);
+		adapter->rx_skb[i] = NULL;
+	}
+
+	pci_info(pdev, "RX ring resources freed\n");
+}
+
+static int frank_e1000e_setup_rx_ring(struct frank_e1000e_adapter *adapter)
+{
+	size_t size;
+	u64 tdba;
+	u32 val;
+	int i;
+	struct pci_dev *pdev = adapter->pci;
+	struct sk_buff *skb;
+	dma_addr_t dma_addr;
+
+	adapter->rx_ring_size = FRANK_E1000E_RX_RING_SIZE;
+
+	adapter->rx_head = 0;
+	adapter->rx_tail = adapter->rx_ring_size - 1;
+
+	size = adapter->rx_ring_size * sizeof(struct frank_e1000e_legacy_rx_desc);
+	size = ALIGN(size, 4096);
+
+	adapter->rx_ring = dmam_alloc_coherent(&pdev->dev, size, 
+						&adapter->rx_ring_dma, GFP_KERNEL);
+	if (!adapter->rx_ring) {
+		pci_err(pdev, "Failed to alloc rx ring\n");
+		return -ENOMEM;
+	}
+
+	adapter->rx_skb = devm_kzalloc(&pdev->dev, sizeof(struct sk_buff *) * adapter->rx_ring_size,
+								GFP_KERNEL);
+	if (!adapter->rx_skb) {
+		pci_err(pdev, "Failed to alloc rx_skb\n");
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < adapter->rx_ring_size; i++) {
+		skb = netdev_alloc_skb(adapter->netdev, 2048 + NET_IP_ALIGN);
+		if (!skb) {
+			goto clean_skbs;
+		}
+
+		skb_reserve(skb, NET_IP_ALIGN);
+
+		dma_addr = dma_map_single(&pdev->dev, skb->data, 2048, DMA_FROM_DEVICE);
+		if (dma_mapping_error(&pdev->dev, dma_addr)) {
+			dev_kfree_skb(skb);
+			goto clean_skbs;
+		}
+
+		adapter->rx_ring[i].buffer_addr = cpu_to_le64(dma_addr);
+		adapter->rx_skb[i] = skb;
+	}
+
+	tdba = adapter->rx_ring_dma; 
+	size = adapter->rx_ring_size * sizeof(struct frank_e1000e_legacy_rx_desc);
+
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_RDBAL0_REG, tdba & DMA_BIT_MASK(32));
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_RDBAH0_REG, (tdba >> 32) & 0xFFFFFFFF);
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_RDLEN0_REG, size);
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_RDH0_REG, adapter->rx_head);
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_RDT0_REG, adapter->rx_tail);
+
+	val = frank_e1000e_readl(adapter->hw, FRANK_E1000E_RCTL_REG);
+	val |= FRANK_E1000E_RCTL_EN;
+	val |= FRANK_E1000E_RCTL_BAM;
+	val &= ~FRANK_E1000E_RCTL_DTYP_MASK;
+	val |= FRANK_E1000E_RCTL_DTYP_LEGACY;
+	val = FRANK_E1000E_RCTL_BSIZE_2048(val);
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_RCTL_REG, val);
+
+	val = frank_e1000e_readl(adapter->hw, FRANK_E1000E_RFCTL_REG);
+	val &= ~FRANK_E1000E_RFCTL_EXSTEN;
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_RFCTL_REG, val);
+
+	pci_info(pdev, "RX ring initialize with %u descriptors\n",
+			adapter->rx_ring_size);
+
+	return 0;
+
+clean_skbs:
+	frank_e1000e_free_rx_ring(adapter);
+
+	return -ENOMEM;
+}
+
 static int frank_e1000e_init(struct frank_e1000e_adapter *adapter)
 {
 	struct pci_dev *pdev = adapter->pci;
@@ -394,6 +569,11 @@ static int frank_e1000e_init(struct frank_e1000e_adapter *adapter)
 	}
 
 	ret = frank_e1000e_setup_tx_ring(adapter);
+	if (ret) {
+		goto error;
+	}
+
+	ret = frank_e1000e_setup_rx_ring(adapter);
 	if (ret) {
 		goto error;
 	}
@@ -496,6 +676,9 @@ static void frank_e1000e_remove(struct pci_dev *pdev)
 	pci_info(pdev, "In Frank e1000e test driver remove function\n");
 
 	if (adapter && adapter->netdev) {
+		
+		frank_e1000e_free_rx_ring(adapter);
+
 		unregister_netdev(adapter->netdev);
 		free_netdev(adapter->netdev);
 		adapter->netdev = NULL;
