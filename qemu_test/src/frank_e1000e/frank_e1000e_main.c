@@ -282,7 +282,7 @@ static void frank_e1000e_clear_tx_ring(struct frank_e1000e_adapter *adapter)
 	}
 }
 
-static void frank_e1000e_clean_rx_ring(struct frank_e1000e_adapter *adapter)
+static void frank_e1000e_clear_rx_ring(struct frank_e1000e_adapter *adapter)
 {
 	struct frank_e1000e_legacy_rx_desc *desc;
 	unsigned int head;
@@ -352,6 +352,47 @@ do_next:
 	}
 }
 
+static irqreturn_t frank_e1000e_msix_rx_handler(int irq, void *data)
+{
+	struct frank_e1000e_adapter *adapter = data;
+
+	frank_e1000e_clear_rx_ring(adapter);
+
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_IMS_REG, FRANK_E1000E_INT_RXQ0);
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t frank_e1000e_msix_tx_handler(int irq, void *data)
+{
+	struct frank_e1000e_adapter *adapter = data;
+
+	frank_e1000e_clear_tx_ring(adapter);
+
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_IMS_REG, FRANK_E1000E_INT_TXQ0);
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t frank_e1000e_msix_other_handler(int irq, void *data)
+{
+	struct frank_e1000e_adapter *adapter = data;
+	struct pci_dev *pdev = adapter->pci;
+	u32 val, status;
+	
+	val = frank_e1000e_readl(adapter->hw, FRANK_E1000E_ICR_REG);
+
+	if (val & FRANK_E1000E_INT_LSC) {
+		status = frank_e1000e_readl(adapter->hw, FRANK_E1000E_STATUS_REG);
+		pci_info(pdev, "Link %s\n", (status & FRANK_E1000E_STATUS_LU) ? 
+				"Up" : "Down");
+	}
+
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_ICR_REG, val);
+
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_IMS_REG, FRANK_E1000E_INT_OTHER);
+	return IRQ_HANDLED;
+}
+
+
 static irqreturn_t frank_e1000e_irq_handler(int irq, void *data)
 {
 	struct frank_e1000e_adapter *adapter = data;
@@ -371,7 +412,7 @@ static irqreturn_t frank_e1000e_irq_handler(int irq, void *data)
 	}
 
 	if (val & (FRANK_E1000E_INT_RXT0 | FRANK_E1000E_INT_RXDMT0)) {
-		frank_e1000e_clean_rx_ring(adapter);
+		frank_e1000e_clear_rx_ring(adapter);
 	}
 	
 	
@@ -379,17 +420,94 @@ static irqreturn_t frank_e1000e_irq_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+struct frank_e1000e_msix frank_e1000e_msix_vectors[FRANK_E1000E_MSIX_VECTORS]= {
+	{.name = FRANK_E1000E_MSIX_RX_NAME, .handler = frank_e1000e_msix_rx_handler},
+	{.name = FRANK_E1000E_MSIX_TX_NAME, .handler = frank_e1000e_msix_tx_handler},
+	{.name = FRANK_E1000E_MSIX_OTHER_NAME, .handler = frank_e1000e_msix_other_handler}
+};
+
+static void frank_e1000e_config_msix(struct frank_e1000e_adapter *adapter)
+{
+	u32 val;
+
+	val = frank_e1000e_readl(adapter->hw, FRANK_E1000E_IVAR);
+
+	//Disable RXQ1 and TXQ1
+	val &= ~FRANK_E1000E_IVAR_INT_ALLOC_EN(FRANK_E1000E_IVAR_RXQ1);
+	val &= ~FRANK_E1000E_IVAR_INT_ALLOC_EN(FRANK_E1000E_IVAR_TXQ1);
+	
+	//RXQ0
+	val |= FRANK_E1000E_IVAR_INT_ALLOC(FRANK_E1000E_IVAR_RXQ0, FRANK_E1000E_MSIX_RX);
+	val |= FRANK_E1000E_IVAR_INT_ALLOC_EN(FRANK_E1000E_IVAR_RXQ0);
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_EITER(FRANK_E1000E_MSIX_RX),
+		1);
+
+	//TXQ0
+	val |= FRANK_E1000E_IVAR_INT_ALLOC(FRANK_E1000E_IVAR_TXQ0, FRANK_E1000E_MSIX_TX);
+	val |= FRANK_E1000E_IVAR_INT_ALLOC_EN(FRANK_E1000E_IVAR_TXQ0);
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_EITER(FRANK_E1000E_MSIX_TX),
+		1);
+
+	//OTHER
+	val |= FRANK_E1000E_IVAR_INT_ALLOC(FRANK_E1000E_IVAR_OTHER, FRANK_E1000E_MSIX_OTHER);
+	val |= FRANK_E1000E_IVAR_INT_ALLOC_EN(FRANK_E1000E_IVAR_OTHER);
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_EITER(FRANK_E1000E_MSIX_OTHER),
+		1);
+
+	val |= FRANK_E1000E_IVAR_ITR_WB;
+	frank_e1000e_writel(adapter->hw, FRANK_E1000E_IVAR, val);
+
+	val = frank_e1000e_readl(adapter->hw, FRANK_E1000E_CTRL_EXT);
+	val &= ~FRANK_E1000E_CTRL_EXT_IAME;
+	val |= FRANK_E1000E_CTRL_EXT_EIAME | FRANK_E1000E_CTRL_EXT_PBA_CLR;
+	frank_e1000e_writel(adapter->hw,FRANK_E1000E_CTRL_EXT, val);
+
+	val = FRANK_E1000E_INT_RXQ0 | FRANK_E1000E_INT_TXQ0 | FRANK_E1000E_INT_OTHER;
+	frank_e1000e_writel(adapter->hw,FRANK_E1000E_EIAC, val);
+}
+
 static int frank_e1000e_init_irq(struct frank_e1000e_adapter *adapter)
 {	
 	int ret = 0;
 	struct pci_dev *pdev = adapter->pci;
+	int i;
 
-	ret = devm_request_irq(&pdev->dev, pdev->irq, frank_e1000e_irq_handler,
-					IRQF_SHARED, DRIVER_NAME, adapter);
-	if (ret) {
-		pci_err(pdev, "Failed to request irq\n");		
+	ret = pci_alloc_irq_vectors(pdev, 1, FRANK_E1000E_MSIX_VECTORS,
+				PCI_IRQ_ALL_TYPES);
+	//ret = pci_alloc_irq_vectors(pdev, 1, 1,
+	//			PCI_IRQ_INTX);
+
+
+	if (ret < 0){
+		pci_err(pdev, "Failed to alloc irq vectors\n");
+		goto error;
 	}
 
+	pci_info(pdev, "Allocated %d IRQ vectors\n", ret);
+
+	if (ret == 1) {
+		ret = devm_request_irq(&pdev->dev,  pci_irq_vector(pdev, 0), frank_e1000e_irq_handler,
+					IRQF_SHARED, DRIVER_NAME, adapter);
+		if (ret) {
+			pci_err(pdev, "Failed to request irq\n");
+			goto error;
+		}		
+	} else {
+		for (i = 0; i < FRANK_E1000E_MSIX_VECTORS; i++) {
+			ret = devm_request_irq(&pdev->dev,  pci_irq_vector(pdev, i), 
+						frank_e1000e_msix_vectors[i].handler,
+						0, frank_e1000e_msix_vectors[i].name, adapter);
+			if (ret) {
+				pci_err(pdev, "Failed to request msi/msix irq\n");
+				goto error;
+			}			
+		}
+		frank_e1000e_config_msix(adapter);
+	}
+
+	return 0;
+
+error:
 	return ret;
 }
 
@@ -678,6 +796,9 @@ static void frank_e1000e_remove(struct pci_dev *pdev)
 	if (adapter && adapter->netdev) {
 		
 		frank_e1000e_free_rx_ring(adapter);
+		
+
+		pci_free_irq_vectors(pdev);
 
 		unregister_netdev(adapter->netdev);
 		free_netdev(adapter->netdev);

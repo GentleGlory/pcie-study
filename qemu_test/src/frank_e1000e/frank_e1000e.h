@@ -40,6 +40,12 @@
 #define   FRANK_E1000E_EERD_DATA(val)			(((val) & GENMASK(31,16)) >> 16)
 #define   FRANK_E1000E_EERD_TIMEOUT		10000	//10ms
 
+#define FRANK_E1000E_CTRL_EXT			0x00018
+#define   FRANK_E1000E_CTRL_EXT_EIAME	BIT(24)
+#define   FRANK_E1000E_CTRL_EXT_IAME	BIT(27)
+#define   FRANK_E1000E_CTRL_EXT_PBA_CLR	BIT(31)
+
+
 #define FRANK_E1000E_ICR_REG			0x000C0
 #define   FRANK_E1000E_ICR_LSC			BIT(2)
 
@@ -71,6 +77,29 @@
 		FRANK_E1000E_INT_MNG | FRANK_E1000E_INT_RXQ0 |\
 		FRANK_E1000E_INT_RXQ1 | FRANK_E1000E_INT_TXQ0 |\
 		FRANK_E1000E_INT_TXQ1 | FRANK_E1000E_INT_OTHER)
+#define   FRANK_E1000E_INT_OTHER_MASK \
+		(FRANK_E1000E_INT_LSC | FRANK_E1000E_INT_RXO |\
+		FRANK_E1000E_INT_MDAC | FRANK_E1000E_INT_SRPD |\
+		FRANK_E1000E_INT_ACK | FRANK_E1000E_INT_MNG)
+	
+#define FRANK_E1000E_EIAC		0x000DC
+
+
+#define FRANK_E1000E_IVAR						0x000E4
+#define   FRANK_E1000E_IVAR_INT_ALLOC(n, val)	((val) << (4 * n))
+#define   FRANK_E1000E_IVAR_INT_ALLOC_EN(n)		( BIT(3) << (4 * n))
+#define   FRANK_E1000E_IVAR_ITR_WB				BIT(31)
+#define   FRANK_E1000E_IVAR_RXQ0				0
+#define   FRANK_E1000E_IVAR_RXQ1				1
+#define   FRANK_E1000E_IVAR_TXQ0				2
+#define   FRANK_E1000E_IVAR_TXQ1				3
+#define   FRANK_E1000E_IVAR_OTHER				4
+
+
+#define FRANK_E1000E_EITER(n)			(0x000E8 + 4 * (n))
+//The interval is specified in 256 ns increments. Zero disables interrupt
+//throttling logic.
+#define   FRANK_E1000E_EITER_INTERVAL(ns)	((ns) >> 8) 
 
 #define FRANK_E1000E_RCTL_REG			0x00100
 #define   FRANK_E1000E_RCTL_EN			BIT(1)
@@ -147,9 +176,24 @@
 #define FRANK_E1000E_RX_STAT_DD		BIT(0)
 #define FRANK_E1000E_RX_STAT_EOP	BIT(1)
 
-struct frank_e1000e_adapter; 
+#define FRANK_E1000E_MSIX_RX		0
+#define FRANK_E1000E_MSIX_TX		1
+#define FRANK_E1000E_MSIX_OTHER		2
+#define FRANK_E1000E_MSIX_VECTORS	3
+
+#define FRANK_E1000E_MSIX_RX_NAME	"RX"
+#define FRANK_E1000E_MSIX_TX_NAME	"TX"
+#define FRANK_E1000E_MSIX_OTHER_NAME	"Other"
+
+struct frank_e1000e_adapter;
 struct frank_e1000e_hw;
-struct frank_e1000e_tx_desc; 
+struct frank_e1000e_tx_desc;
+struct frank_e1000e_msix;
+
+struct frank_e1000e_msix {
+	const char* name;
+	irqreturn_t (*handler)(int irq, void *data);
+};
 
 struct frank_e1000e_hw {
 	void __iomem 					*hw_addr;
@@ -209,6 +253,9 @@ struct frank_e1000e_adapter {
 	unsigned int					rx_head;
 	unsigned int					rx_tail;
 	struct sk_buff					**rx_skb;
+
+	bool	msi_enabled;
+	
 };
 
 static inline void frank_e1000e_writel(struct frank_e1000e_hw *hw, u32 reg, u32 val)
